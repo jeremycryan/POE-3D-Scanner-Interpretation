@@ -1,7 +1,9 @@
 #!/usr/local/bin/python
 
-from serial import Serial, SerialException
+from serial import Serial, SerialException, serialutil
+import time
 import numpy as np
+import io
 from math import cos, sin, atan2, pi
 import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d import Axes3D
@@ -13,19 +15,55 @@ def compile_data(serial_object):
     Returns list of data points as numpy array. """
 
     data = []
+    points_count = 0
 
-    #   TODO make this loop stop
+    print("Waiting for button press...")
+    repr(serial_object.readline())
+    while serial_object.readline() == "" or \
+            serial_object.readline() == "begin\n":
+        pass
+
+    print("Connection established.")
+
     while True:
         #   Read the most recent serial output
-        result = serial_object.readline();
+        try:
+            result = serial_object.readline();
+            serial_object.flush()
+        except:
+            break
 
         #   Convert string into list of integers
         result_split = result.split()
-        result_floats = [float(item) for item in result_split]
+        result_floats_raw = [float(item) for item in result_split]
+
+        #   Take median of all distance measurements
+        scans_per_distance = len(result_floats_raw) - 2
+        angles = result_floats_raw[0:2]
+        distance = np.median(result_floats_raw[2:])
+        result_floats = angles + [distance]
+
+        print result_floats
+        #   Break out of loop if no data is received, scan is done
+        if len(result_floats) <= 1:
+            break
 
         #   Add to list of data if different than last data point
-        if not len(data) or (len(data) and result_ints != data[-1]):
-            data.append(result_floats)
+        if not len(data) or (len(data) and (result_floats != data[-1])):
+
+            #   Print progress
+            points_count += 1
+            print("Points scanned: %s" % points_count)
+
+            distance_threshold = 100
+            #   Raw infrared readings less than threshold are removed
+            if result_floats[-1] >= distance_threshold:
+                data.append(result_floats)
+
+        #   Don't run at max clock speed
+        time.sleep(0.005)
+
+    print("Scan complete!")
 
     #   Convert data to numpy array and return
     return np.asarray(data).T
@@ -60,7 +98,6 @@ def data_to_3d(data, initial_position, initial_direction):
         scan_pos = determine_position(vec, initial_position, initial_direction)
         scan_dir = determine_direction(vec, initial_direction)
         point = determine_coordinate(scan_pos, scan_dir, dist)
-        print points.shape, point.shape
         points[0, i] = point[0][0]
         points[1, i] = point[1][0]
         points[2, i] = point[2][0]
@@ -102,9 +139,6 @@ def determine_direction(processed_data_vector, initial_direction):
     """ Data vector should include the positions of each servo (rad) and the
     output of the infrared distance sensor (m). """
 
-    #   TODO determine actual initial vector
-    #   initial_direction = np.asarray([[0], [1], [0]]);
-
     z_difference = atan2(-initial_direction[0], initial_direction[1])
     corrected_for_z = rotate_z(initial_direction, -z_difference)
     after_x_corrected = rotate_x(corrected_for_z, processed_data_vector[1])
@@ -118,10 +152,7 @@ def determine_position(processed_data_vector, initial_position, initial_directio
     """ Data vector should include the positions of each servo (rad) and the
     output of the infrared distance sensor (m). """
 
-    #   TODO determine actual initial vector
-    #   initial_direction = np.asarray([[0], [1], [0]]);
-
-    minor_axis_height = 0.02769    #   TODO sub in actual value
+    minor_axis_height = 0.02769
 
     pos_to_secondary_pivot = processed_data_vector - minor_axis_height
     z_difference = atan2(-initial_direction[0], initial_direction[1])
@@ -149,20 +180,39 @@ def plot_points(pdata):
     fig = plt.figure()
     ax = fig.add_subplot(111, projection='3d')
     ax.scatter(xs, ys, zs)
+
+    ax.set_xlabel("X axis")
+    ax.set_ylabel("Y axis")
+    ax.set_zlabel("Z axis")
+
     plt.show()
 
 if __name__ == '__main__':
-    data_vec = np.asarray([[10, 25, 30, 10, 20, 30, 10, 20, 30],
-                            [10, 10, 10, 20, 20, 20, 30, 30, 30],
-                            [3.6, 3.65, 3.60, 3.68, 2.9, 2.4, 3.04, 2.99, 2.7]])
-    unit_vec = np.asarray([[0], [1], [0]])
-    initial_z_angle = -0.610865  #   in radians, counterclockwise
-    initial_direction = rotate_z(unit_vec, initial_z_angle)
-    initial_pos = np.asarray([[0.00702], [0.0451], [0.04418]])
+    #   Establish serial connection
+    try:
+        cxn = Serial('/dev/ttyACM0', baudrate=9600, timeout = 2)
+        sio = io.TextIOWrapper(io.BufferedRWPair(cxn, cxn))
 
-    a = process_data(data_vec)
-    b = data_to_3d(a, initial_direction, initial_pos)
-    plot_points(b)
-    # data_vec = np.asarray([[pi/2], [pi/3], [0]])
-    cxn = Serial('/dev/ttyACM0', baudrate=9600)
-    data = compile_data(cxn)
+        #   Read data from scan
+        data_vec = compile_data(sio)
+
+        #   Set some initial conditions
+        unit_vec = np.asarray([[0], [1], [0]])
+        initial_z_angle = -0.610865  #   in radians, counterclockwise
+        initial_x_angle = pi/9
+        initial_direction = rotate_x(unit_vec, -initial_x_angle)
+        initial_direction = rotate_z(initial_direction, initial_z_angle)
+        initial_pos = np.asarray([[0.00702], [0.0451], [0.04418]])
+
+        #   Plot using matplotlib
+        a = process_data(data_vec)
+        b = data_to_3d(a, initial_pos, initial_direction)
+        c = open("data.txt", "w")
+        c.write(str(b))
+        c.close()
+        plot_points(a)
+        plot_points(b)
+
+    #   Print error statement if connection not established
+    except serialutil.SerialException:
+        raise serialutil.SerialException, "Arduino not connected, or port busy."
